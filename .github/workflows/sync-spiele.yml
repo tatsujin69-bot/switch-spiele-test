@@ -1,0 +1,87 @@
+
+name: Switch-Spiele synchronisieren
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17,47 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  synchronisieren:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository laden
+        uses: actions/checkout@v4
+
+      - name: Python vorbereiten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Excel-Bibliothek installieren
+        run: pip install openpyxl
+
+      - name: Google Sheets herunterladen
+        run: |
+          curl --fail --location --retry 3 \
+            --output switch-spiele.xlsx \
+            "https://docs.google.com/spreadsheets/d/e/2PACX-1vSf78Y8Q4vvzOFh4sG5oXmn61I4YIYTnpvmZaMENBoOHpbalQCaqjeZMrpB0-MgZVUYA-FJk2OxxHcA/pub?output=xlsx"
+
+      - name: JSON-Lesedatei erstellen
+        run: |
+          python - <<'PY'
+          import json
+          import datetime
+          from openpyxl import load_workbook
+
+          workbook = load_workbook(
+              "switch-spiele.xlsx",
+              read_only=True,
+              data_only=True
+          )
+
+          def convert(value):
+              if isinstance(value, (
+                  datetime.datetime,
+                  datetime.date,
+                  datetime.time
+              )):
+                  return value.isoformat()
+              return value
+
+          daten = {}
+
+          for sheet in workbook.worksheets:
+              daten[sheet.title] = [
+                  [convert(value) for value in row]
+                  for row in sheet.iter_rows(values_only=True)
+              ]
+
+          with open(
+              "switch-spiele.json", "w", encoding="utf-8"
+          ) as file:
+              json.dump(
+                  daten, file,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+          print("Tabellenblätter:", list(daten))
+          PY
+
+      - name: Änderungen auf GitHub speichern
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add switch-spiele.xlsx switch-spiele.json
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Spielebibliothek aktualisieren"
+            git push
+          else
+            echo "Keine Änderungen vorhanden."
+          fi
