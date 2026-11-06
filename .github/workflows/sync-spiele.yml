@@ -1,5 +1,5 @@
 
-name: Switch-Spiele synchronisieren
+name: Spielebibliothek synchronisieren
 
 on:
   workflow_dispatch:
@@ -31,15 +31,20 @@ jobs:
             --output switch-spiele.xlsx \
             "https://docs.google.com/spreadsheets/d/e/2PACX-1vSf78Y8Q4vvzOFh4sG5oXmn61I4YIYTnpvmZaMENBoOHpbalQCaqjeZMrpB0-MgZVUYA-FJk2OxxHcA/pub?output=xlsx"
 
-      - name: JSON-Lesedatei erstellen
+      - name: Kleine JSON-Dateien erstellen
         run: |
           python - <<'PY'
           import json
           import datetime
+          from pathlib import Path
           from openpyxl import load_workbook
 
+          QUELLE = "switch-spiele.xlsx"
+          ZIEL = Path("spiele-daten")
+          MAX_BYTES = 100000
+
           workbook = load_workbook(
-              "switch-spiele.xlsx",
+              QUELLE,
               read_only=True,
               data_only=True
           )
@@ -53,31 +58,136 @@ jobs:
                   return value.isoformat()
               return value
 
-          daten = {}
-
-          for sheet in workbook.worksheets:
-              daten[sheet.title] = [
-                  [convert(value) for value in row]
-                  for row in sheet.iter_rows(values_only=True)
-              ]
-
-          with open(
-              "switch-spiele.json", "w", encoding="utf-8"
-          ) as file:
-              json.dump(
-                  daten, file,
+          def encode(value):
+              return json.dumps(
+                  value,
                   ensure_ascii=False,
-                  indent=2
+                  separators=(",", ":")
+              ).encode("utf-8")
+
+          def schreiben(pfad, daten):
+              pfad.parent.mkdir(
+                  parents=True,
+                  exist_ok=True
+              )
+              pfad.write_bytes(encode(daten))
+
+          uebersicht = {
+              "quelle": "Google Sheets",
+              "format": "Zeilen mit Original-Zeilennummer",
+              "tabellenblaetter": []
+          }
+
+          erzeugte_dateien = set()
+
+          for nummer, sheet in enumerate(
+              workbook.worksheets, start=1
+          ):
+              ordner = f"blatt-{nummer:02d}"
+              dateien = []
+              paket = []
+              paket_nummer = 1
+              anzahl_zeilen = 0
+
+              def paket_speichern():
+                  global paket_nummer, paket
+                  if not paket:
+                      return
+
+                  name = (
+                      f"{ordner}/"
+                      f"teil-{paket_nummer:04d}.json"
+                  )
+                  pfad = ZIEL / name
+
+                  schreiben(
+                      pfad,
+                      {
+                          "tabellenblatt": sheet.title,
+                          "zeilen": paket
+                      }
+                  )
+
+                  erzeugte_dateien.add(pfad)
+                  dateien.append({
+                      "datei": str(pfad),
+                      "von_zeile": paket[0][0],
+                      "bis_zeile": paket[-1][0]
+                  })
+
+                  paket_nummer += 1
+                  paket = []
+
+              for zeilennummer, row in enumerate(
+                  sheet.iter_rows(values_only=True),
+                  start=1
+              ):
+                  werte = [convert(v) for v in row]
+
+                  while werte and werte[-1] is None:
+                      werte.pop()
+
+                  if not werte or all(
+                      v is None or v == ""
+                      for v in werte
+                  ):
+                      continue
+
+                  eintrag = [zeilennummer, werte]
+
+                  test = {
+                      "tabellenblatt": sheet.title,
+                      "zeilen": paket + [eintrag]
+                  }
+
+                  if (
+                      paket
+                      and len(encode(test)) > MAX_BYTES
+                  ):
+                      paket_speichern()
+
+                  paket.append(eintrag)
+                  anzahl_zeilen += 1
+
+              paket_speichern()
+
+              uebersicht["tabellenblaetter"].append({
+                  "name": sheet.title,
+                  "nummer": nummer,
+                  "datenzeilen": anzahl_zeilen,
+                  "dateien": dateien
+              })
+
+              print(
+                  sheet.title,
+                  "-",
+                  anzahl_zeilen,
+                  "Zeilen,",
+                  len(dateien),
+                  "Dateien"
               )
 
-          print("Tabellenblätter:", list(daten))
+          index = ZIEL / "index.json"
+          schreiben(index, uebersicht)
+          erzeugte_dateien.add(index)
+
+          # Nur früher erzeugte Teil-Dateien aufräumen.
+          # Die alte switch-spiele.json bleibt erhalten.
+          for pfad in ZIEL.glob(
+              "blatt-*/teil-*.json"
+          ):
+              if pfad not in erzeugte_dateien:
+                  pfad.unlink()
+
+          print("Synchronisierung vorbereitet.")
           PY
 
       - name: Änderungen auf GitHub speichern
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add switch-spiele.xlsx switch-spiele.json
+
+          git add switch-spiele.xlsx spiele-daten/
 
           if ! git diff --cached --quiet; then
             git commit -m "Spielebibliothek aktualisieren"
